@@ -134,6 +134,8 @@ uvx excel-mcp-server streamable-http
 - **数据透视表**：创建
 - **VBA**：在 Excel 文件上执行 VBA 代码（含安全与备份说明）
 
+  **使用 VBA 功能前**：请在 Excel 中开启对 VBA 工程对象模型的信任，否则会报「安全检查失败」。操作：**文件 → 选项 → 信任中心 → 信任中心设置 → 宏设置**，勾选 **「信任对 VBA 工程对象模型的访问」**。
+
 ## 许可证
 
 MIT License，详见 [LICENSE](LICENSE)。

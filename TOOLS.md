@@ -504,12 +504,13 @@ execute_excel_vba(
 - Execution timeout protection (default 30 seconds)
 - Concurrent execution protection via global lock
 
-**Prerequisites:**
+**Prerequisites / 前置条件：**
 
-Before using this tool, you must enable VBA trust settings in Excel:
-1. Open Excel → File → Options → Trust Center → Trust Center Settings
-2. Select "Macro Settings"
-3. Check "Trust access to the VBA project object model"
+使用本工具前，必须在 Excel 中启用对 VBA 工程对象模型的访问，否则会返回「安全检查失败：请在 Excel 信任中心勾选“信任对 VBA 工程对象模型的访问”」。
+
+- 打开 Excel → **文件** → **选项** → **信任中心** → **信任中心设置**
+- 进入 **宏设置**
+- 勾选 **「信任对 VBA 工程对象模型的访问」**（Trust access to the VBA project object model）
 
 **Example Usage:**
 
