@@ -5,3 +5,5 @@ __pycache__/
 .notes/
 *.log
 .hypothesis/
+.pytest_cache/
+.kiro/
