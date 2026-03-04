@@ -634,8 +634,13 @@ def execute_excel_vba(
     Example VBA code / VBA 代码示例:
         Sub Main()
             Cells(1, 1).Value = "Hello"
-            MsgBox "Done"
         End Sub
+
+    NOTE / 注意：
+    - When calling this tool via MCP, avoid using MsgBox, InputBox or other interactive dialogs,
+      as they will block the tool call waiting for user interaction.
+    - 通过 MCP 调用本工具时，应避免使用 MsgBox、InputBox 等需要人工交互的对话框，
+      否则会因为等待用户点击/输入而导致调用卡顿或挂起。推荐将调试信息写入单元格或返回结果中。
     """
     import json
     
