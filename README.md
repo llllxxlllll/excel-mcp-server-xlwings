@@ -7,7 +7,6 @@
 [![许可证: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![smithery 徽章](https://smithery.ai/badge/@haris-musa/excel-mcp-server)](https://smithery.ai/server/@haris-musa/excel-mcp-server)
 [![安装 MCP 服务端](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=excel-mcp-server&config=eyJjb21tYW5kIjoidXZ4IGV4Y2VsLW1jcC1zZXJ2ZXIgc3RkaW8ifQ%3D%3D)
-
 基于 **Model Context Protocol (MCP)** 的 Excel 操作服务端，支持对 Excel 文件进行实时编辑。本服务端基于 **xlwings**，可直接连接本地已打开的 Excel 实例，在 Excel 窗口中即时查看修改结果。
 
 ## 环境要求
