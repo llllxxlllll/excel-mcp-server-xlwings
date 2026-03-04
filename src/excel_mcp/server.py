@@ -13,7 +13,11 @@ from excel_mcp.exceptions import (
     FormattingError,
     CalculationError,
     PivotError,
-    ChartError
+    ChartError,
+    VBAExecutionError,
+    VBASecurityError,
+    VBATimeoutError,
+    VBABusyError,
 )
 
 # Import from excel_mcp package with consistent _impl suffixes
@@ -21,23 +25,19 @@ from excel_mcp.validation import (
     validate_formula_in_cell_operation as validate_formula_impl,
     validate_range_in_sheet_operation as validate_range_impl
 )
-from excel_mcp.chart import create_chart_in_sheet as create_chart_impl
+from excel_mcp.chart import chart_operation as chart_operation_impl
 from excel_mcp.workbook import get_workbook_info
 from excel_mcp.data import write_data
 from excel_mcp.pivot import create_pivot_table as create_pivot_table_impl
 from excel_mcp.tables import create_excel_table as create_table_impl
 from excel_mcp.sheet import (
-    copy_sheet,
-    delete_sheet,
-    rename_sheet,
-    merge_range,
-    unmerge_range,
-    get_merged_ranges,
-    insert_row,
-    insert_cols,
-    delete_rows,
-    delete_cols,
+    worksheet_operation as worksheet_operation_impl,
+    merge_cell_operation as merge_cell_operation_impl,
+    row_column_operation as row_column_operation_impl,
+    range_operation as range_operation_impl,
 )
+from excel_mcp.calculations import formula_operation as formula_operation_impl
+from excel_mcp.vba_executor import VBAExecutor
 
 # Get project root directory path for log file path.
 # When using the stdio transmission method,
@@ -93,50 +93,40 @@ def get_excel_path(filename: str) -> str:
     return os.path.join(EXCEL_FILES_PATH, filename)
 
 @mcp.tool()
-def apply_formula(
+def formula_operation(
     filepath: str,
     sheet_name: str,
     cell: str,
-    formula: str,
+    action: str,
+    formula: str = None,
 ) -> str:
-    """
-    Apply Excel formula to cell.
-    Excel formula will write to cell with verification.
+    """Unified formula operation tool.
+    
+    统一的公式操作工具。
+    
+    Actions / 操作类型:
+    - apply: Apply formula to cell (requires formula)
+             应用公式到单元格（需要 formula）
+    - validate: Validate formula syntax (requires formula)
+                验证公式语法（需要 formula）
+    - get: Get formula from cell
+           获取单元格公式
     """
     try:
         full_path = get_excel_path(filepath)
-        # First validate the formula
-        validation = validate_formula_impl(full_path, sheet_name, cell, formula)
-        if isinstance(validation, dict) and "error" in validation:
-            return f"Error: {validation['error']}"
-            
-        # If valid, apply the formula
-        from excel_mcp.calculations import apply_formula as apply_formula_impl
-        result = apply_formula_impl(full_path, sheet_name, cell, formula)
-        return result["message"]
+        result = formula_operation_impl(
+            filepath=full_path,
+            sheet_name=sheet_name,
+            cell=cell,
+            action=action,
+            formula=formula
+        )
+        return result.get("message", str(result))
     except (ValidationError, CalculationError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error applying formula: {e}")
-        raise
-
-@mcp.tool()
-def validate_formula_syntax(
-    filepath: str,
-    sheet_name: str,
-    cell: str,
-    formula: str,
-) -> str:
-    """Validate Excel formula syntax without applying it."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = validate_formula_impl(full_path, sheet_name, cell, formula)
-        return result["message"]
-    except (ValidationError, CalculationError) as e:
+        logger.error(f"Error in formula operation: {e}")
         return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error validating formula: {e}")
-        raise
 
 @mcp.tool()
 def format_range(
@@ -159,7 +149,11 @@ def format_range(
     protection: Optional[Dict[str, Any]] = None,
     conditional_format: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Apply formatting to a range of cells."""
+    """Apply formatting to a range of cells.
+    
+    对单元格区域应用格式设置。
+    支持字体、颜色、边框、对齐、数字格式、条件格式等。
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.formatting import format_range as format_range_func
@@ -203,16 +197,29 @@ def read_data_from_excel(
     """
     Read data from Excel worksheet with cell metadata including validation rules.
     
+    从Excel工作表读取数据，包含单元格元数据和验证规则。
+    
+    **智能压缩**: 当数据超过100行时，自动返回压缩的结构摘要，包含：
+    - 表格基本信息（行数、列数、范围）
+    - 列结构分析（列名、数据类型、唯一值统计）
+    - 潜在索引列识别
+    - 样例数据（前5行 + 后3行）
+    
     Args:
-        filepath: Path to Excel file
-        sheet_name: Name of worksheet
-        start_cell: Starting cell (default A1)
-        end_cell: Ending cell (optional, auto-expands if not provided)
-        preview_only: Whether to return preview only
+        filepath: Path to Excel file / Excel文件路径
+        sheet_name: Name of worksheet / 工作表名称
+        start_cell: Starting cell (default A1) / 起始单元格（默认A1）
+        end_cell: Ending cell (optional, auto-expands if not provided) / 结束单元格（可选，不提供则自动扩展）
+        preview_only: Whether to return preview only / 是否仅返回预览
     
     Returns:  
     JSON string containing structured cell data with validation metadata.
     Each cell includes: address, value, row, column, and validation info (if any).
+    For large datasets (>100 rows), returns compressed structure summary with sample data.
+    
+    返回包含结构化单元格数据的JSON字符串。
+    每个单元格包含：地址、值、行、列和验证信息（如有）。
+    对于大数据集（>100行），返回压缩的结构摘要和样例数据。
     """
     try:
         full_path = get_excel_path(filepath)
@@ -223,6 +230,13 @@ def read_data_from_excel(
             start_cell, 
             end_cell
         )
+        
+        # 检查是否为压缩结果
+        if result.get("compressed"):
+            import json
+            return json.dumps(result, indent=2, default=str, ensure_ascii=False)
+        
+        # 非压缩结果，检查是否有数据
         if not result or not result.get("cells"):
             return "No data found in specified range"
             
@@ -244,13 +258,15 @@ def write_data_to_excel(
     """
     Write data to Excel worksheet.
     Excel formula will write to cell without any verification.
+    
+    向Excel工作表写入数据。
+    公式直接写入，不进行验证。
 
-    PARAMETERS:  
-    filepath: Path to Excel file
-    sheet_name: Name of worksheet to write to
-    data: List of lists containing data to write to the worksheet, sublists are assumed to be rows
-    start_cell: Cell to start writing to, default is "A1"
-  
+    PARAMETERS / 参数:  
+    filepath: Path to Excel file / Excel文件路径
+    sheet_name: Name of worksheet to write to / 要写入的工作表名称
+    data: List of lists containing data to write, sublists are rows / 要写入的数据（二维列表，子列表为行）
+    start_cell: Cell to start writing to, default is "A1" / 起始单元格，默认"A1"
     """
     try:
         full_path = get_excel_path(filepath)
@@ -264,7 +280,10 @@ def write_data_to_excel(
 
 @mcp.tool()
 def create_workbook(filepath: str) -> str:
-    """Create new Excel workbook."""
+    """Create new Excel workbook.
+    
+    创建新的Excel工作簿。
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.workbook import create_workbook as create_workbook_impl
@@ -277,49 +296,64 @@ def create_workbook(filepath: str) -> str:
         raise
 
 @mcp.tool()
-def create_worksheet(filepath: str, sheet_name: str) -> str:
-    """Create new worksheet in workbook."""
-    try:
-        full_path = get_excel_path(filepath)
-        from excel_mcp.workbook import create_sheet as create_worksheet_impl
-        result = create_worksheet_impl(full_path, sheet_name)
-        return result["message"]
-    except (ValidationError, WorkbookError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error creating worksheet: {e}")
-        raise
-
-@mcp.tool()
-def create_chart(
+def chart_operation(
     filepath: str,
     sheet_name: str,
-    data_range: str,
-    chart_type: str,
-    target_cell: str,
+    action: str,
+    data_range: str = None,
+    chart_type: str = None,
+    target_cell: str = None,
     title: str = "",
     x_axis: str = "",
-    y_axis: str = ""
+    y_axis: str = "",
+    chart_index: int = None,
+    chart_name: str = None,
+    font_name: str = None,
+    font_size: int = None,
+    title_font_size: int = None
 ) -> str:
-    """Create chart in worksheet."""
+    """Unified chart operation tool.
+    
+    统一的图表操作工具。
+    
+    Actions / 操作类型:
+    - create: Create a chart (requires data_range, chart_type, target_cell)
+              创建图表（需要 data_range, chart_type, target_cell）
+    - list: List all charts in worksheet
+            列出工作表中所有图表
+    - delete: Delete a chart (requires chart_index or chart_name)
+              删除图表（需要 chart_index 或 chart_name）
+    - style: Update chart style (requires chart_index or chart_name, optional font settings)
+             更新图表样式（需要 chart_index 或 chart_name，可选字体设置）
+    """
     try:
         full_path = get_excel_path(filepath)
-        result = create_chart_impl(
+        result = chart_operation_impl(
             filepath=full_path,
             sheet_name=sheet_name,
+            action=action,
             data_range=data_range,
             chart_type=chart_type,
             target_cell=target_cell,
             title=title,
             x_axis=x_axis,
-            y_axis=y_axis
+            y_axis=y_axis,
+            chart_index=chart_index,
+            chart_name=chart_name,
+            font_name=font_name,
+            font_size=font_size,
+            title_font_size=title_font_size
         )
-        return result["message"]
+        if action.lower() == "list":
+            import json
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return result.get("message", str(result))
     except (ValidationError, ChartError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error creating chart: {e}")
-        raise
+        logger.error(f"Error in chart operation: {e}")
+        return f"Error: {str(e)}"
+
 
 @mcp.tool()
 def create_pivot_table(
@@ -331,7 +365,10 @@ def create_pivot_table(
     columns: Optional[List[str]] = None,
     agg_func: str = "mean"
 ) -> str:
-    """Create pivot table in worksheet."""
+    """Create pivot table in worksheet.
+    
+    在工作表中创建数据透视表。
+    """
     try:
         full_path = get_excel_path(filepath)
         result = create_pivot_table_impl(
@@ -358,7 +395,10 @@ def create_table(
     table_name: Optional[str] = None,
     table_style: str = "TableStyleMedium9"
 ) -> str:
-    """Creates a native Excel table from a specified range of data."""
+    """Creates a native Excel table from a specified range of data.
+    
+    从指定数据范围创建Excel原生表格。
+    """
     try:
         full_path = get_excel_path(filepath)
         result = create_table_impl(
@@ -376,61 +416,57 @@ def create_table(
         raise
 
 @mcp.tool()
-def copy_worksheet(
+def worksheet_operation(
     filepath: str,
-    source_sheet: str,
-    target_sheet: str
+    action: str,
+    sheet_name: str = None,
+    new_name: str = None,
+    source_sheet: str = None
 ) -> str:
-    """Copy worksheet within workbook."""
+    """Unified worksheet operation tool.
+    
+    统一的工作表操作工具。
+    
+    Actions / 操作类型:
+    - create: Create worksheet (requires new_name)
+              创建工作表（需要 new_name）
+    - copy: Copy worksheet (requires source_sheet, new_name)
+            复制工作表（需要 source_sheet, new_name）
+    - delete: Delete worksheet (requires sheet_name)
+              删除工作表（需要 sheet_name）
+    - rename: Rename worksheet (requires sheet_name, new_name)
+              重命名工作表（需要 sheet_name, new_name）
+    - list: List all worksheets
+            列出所有工作表
+    """
     try:
         full_path = get_excel_path(filepath)
-        result = copy_sheet(full_path, source_sheet, target_sheet)
-        return result["message"]
+        result = worksheet_operation_impl(
+            filepath=full_path,
+            action=action,
+            sheet_name=sheet_name,
+            new_name=new_name,
+            source_sheet=source_sheet
+        )
+        if action.lower() == "list":
+            import json
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return result.get("message", str(result))
     except (ValidationError, SheetError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error copying worksheet: {e}")
-        raise
-
-@mcp.tool()
-def delete_worksheet(
-    filepath: str,
-    sheet_name: str
-) -> str:
-    """Delete worksheet from workbook."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = delete_sheet(full_path, sheet_name)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
+        logger.error(f"Error in worksheet operation: {e}")
         return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error deleting worksheet: {e}")
-        raise
-
-@mcp.tool()
-def rename_worksheet(
-    filepath: str,
-    old_name: str,
-    new_name: str
-) -> str:
-    """Rename worksheet in workbook."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = rename_sheet(full_path, old_name, new_name)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error renaming worksheet: {e}")
-        raise
 
 @mcp.tool()
 def get_workbook_metadata(
     filepath: str,
     include_ranges: bool = False
 ) -> str:
-    """Get metadata about workbook including sheets, ranges, etc."""
+    """Get metadata about workbook including sheets, ranges, etc.
+    
+    获取工作簿元数据，包括工作表列表、数据范围等。
+    """
     try:
         full_path = get_excel_path(filepath)
         result = get_workbook_info(full_path, include_ranges=include_ranges)
@@ -442,115 +478,86 @@ def get_workbook_metadata(
         raise
 
 @mcp.tool()
-def merge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> str:
-    """Merge a range of cells."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = merge_range(full_path, sheet_name, start_cell, end_cell)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error merging cells: {e}")
-        raise
-
-@mcp.tool()
-def unmerge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> str:
-    """Unmerge a range of cells."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = unmerge_range(full_path, sheet_name, start_cell, end_cell)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error unmerging cells: {e}")
-        raise
-
-@mcp.tool()
-def get_merged_cells(filepath: str, sheet_name: str) -> str:
-    """Get merged cells in a worksheet."""
-    try:
-        full_path = get_excel_path(filepath)
-        return str(get_merged_ranges(full_path, sheet_name))
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error getting merged cells: {e}")
-        raise
-
-@mcp.tool()
-def copy_range(
+def merge_cell_operation(
     filepath: str,
     sheet_name: str,
-    source_start: str,
-    source_end: str,
-    target_start: str,
-    target_sheet: Optional[str] = None
+    action: str,
+    start_cell: str = None,
+    end_cell: str = None
 ) -> str:
-    """Copy a range of cells to another location."""
+    """Unified cell merge operation tool.
+    
+    统一的单元格合并操作工具。
+    
+    Actions / 操作类型:
+    - merge: Merge cells (requires start_cell, end_cell)
+             合并单元格（需要 start_cell, end_cell）
+    - unmerge: Unmerge cells (requires start_cell, end_cell)
+               取消合并（需要 start_cell, end_cell）
+    - list: List all merged cells
+            列出所有合并单元格
+    """
     try:
         full_path = get_excel_path(filepath)
-        from excel_mcp.sheet import copy_range_operation
-        result = copy_range_operation(
-            full_path,
-            sheet_name,
-            source_start,
-            source_end,
-            target_start,
-            target_sheet or sheet_name  # Use source sheet if target_sheet is None
+        result = merge_cell_operation_impl(
+            filepath=full_path,
+            sheet_name=sheet_name,
+            action=action,
+            start_cell=start_cell,
+            end_cell=end_cell
         )
-        return result["message"]
+        if action.lower() == "list":
+            import json
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return result.get("message", str(result))
     except (ValidationError, SheetError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error copying range: {e}")
-        raise
+        logger.error(f"Error in merge cell operation: {e}")
+        return f"Error: {str(e)}"
+
 
 @mcp.tool()
-def delete_range(
+def range_operation(
     filepath: str,
     sheet_name: str,
-    start_cell: str,
-    end_cell: str,
+    action: str,
+    start_cell: str = None,
+    end_cell: str = None,
+    target_cell: str = None,
+    target_sheet: str = None,
     shift_direction: str = "up"
 ) -> str:
-    """Delete a range of cells and shift remaining cells."""
+    """Unified range operation tool.
+    
+    统一的范围操作工具。
+    
+    Actions / 操作类型:
+    - copy: Copy range (requires start_cell, end_cell, target_cell)
+            复制范围（需要 start_cell, end_cell, target_cell）
+    - delete: Delete range (requires start_cell, end_cell)
+              删除范围（需要 start_cell, end_cell）
+    - validate: Validate range (requires start_cell)
+                验证范围（需要 start_cell）
+    """
     try:
         full_path = get_excel_path(filepath)
-        from excel_mcp.sheet import delete_range_operation
-        result = delete_range_operation(
-            full_path,
-            sheet_name,
-            start_cell,
-            end_cell,
-            shift_direction
+        result = range_operation_impl(
+            filepath=full_path,
+            sheet_name=sheet_name,
+            action=action,
+            start_cell=start_cell,
+            end_cell=end_cell,
+            target_cell=target_cell,
+            target_sheet=target_sheet,
+            shift_direction=shift_direction
         )
-        return result["message"]
+        return result.get("message", str(result))
     except (ValidationError, SheetError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error deleting range: {e}")
-        raise
-
-@mcp.tool()
-def validate_excel_range(
-    filepath: str,
-    sheet_name: str,
-    start_cell: str,
-    end_cell: Optional[str] = None
-) -> str:
-    """Validate if a range exists and is properly formatted."""
-    try:
-        full_path = get_excel_path(filepath)
-        range_str = start_cell if not end_cell else f"{start_cell}:{end_cell}"
-        result = validate_range_impl(full_path, sheet_name, range_str)
-        return result["message"]
-    except ValidationError as e:
+        logger.error(f"Error in range operation: {e}")
         return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error validating range: {e}")
-        raise
 
 @mcp.tool()
 def get_data_validation_info(
@@ -563,33 +570,33 @@ def get_data_validation_info(
     This tool helps identify which cell ranges have validation rules
     and what types of validation are applied.
     
+    获取工作表中的所有数据验证规则。
+    帮助识别哪些单元格区域有验证规则及其类型。
+    
     Args:
-        filepath: Path to Excel file
-        sheet_name: Name of worksheet
+        filepath: Path to Excel file / Excel文件路径
+        sheet_name: Name of worksheet / 工作表名称
         
     Returns:
         JSON string containing all validation rules in the worksheet
+        返回包含所有验证规则的JSON字符串
     """
     try:
         full_path = get_excel_path(filepath)
-        from openpyxl import load_workbook
-        from excel_mcp.cell_validation import get_all_validation_ranges
+        from excel_mcp.cell_validation import get_data_validation_info as get_validation_impl
         
-        wb = load_workbook(full_path, read_only=False)
-        if sheet_name not in wb.sheetnames:
-            return f"Error: Sheet '{sheet_name}' not found"
-            
-        ws = wb[sheet_name]
-        validations = get_all_validation_ranges(ws)
-        wb.close()
+        result = get_validation_impl(full_path, sheet_name)
         
-        if not validations:
+        if result.get("status") == "error":
+            return f"Error: {result.get('message', 'Unknown error')}"
+        
+        if not result.get("validations"):
             return "No data validation rules found in this worksheet"
             
         import json
         return json.dumps({
             "sheet_name": sheet_name,
-            "validation_rules": validations
+            "validation_rules": result.get("validations", [])
         }, indent=2, default=str)
         
     except Exception as e:
@@ -597,76 +604,122 @@ def get_data_validation_info(
         raise
 
 @mcp.tool()
-def insert_rows(
+def execute_excel_vba(
     filepath: str,
-    sheet_name: str,
-    start_row: int,
-    count: int = 1
+    vba_code: str,
+    entry_sub_name: str = "Main"
 ) -> str:
-    """Insert one or more rows starting at the specified row."""
+    """Execute dynamic VBA code on an Excel file.
+    
+    在 Excel 文件上执行动态 VBA 代码。
+    
+    SECURITY WARNING / 安全警告:
+    - VBA code is scanned for sensitive keywords before execution
+    - A backup file is created before any modifications
+    - VBA 代码在执行前会扫描敏感关键词
+    - 执行前会创建原文件的备份
+    
+    Args:
+        filepath: Path to Excel file (absolute path required in stdio mode)
+                  Excel 文件路径（stdio 模式需要绝对路径）
+        vba_code: Complete VBA code string, must contain a Sub matching entry_sub_name
+                  完整的 VBA 代码字符串，必须包含与 entry_sub_name 匹配的 Sub
+        entry_sub_name: Name of the entry Sub procedure, default "Main"
+                        入口 Sub 过程名称，默认为 "Main"
+    
+    Returns:
+        JSON string containing execution result with status, message, logs, and backup_path
+        包含执行结果的 JSON 字符串，包括 status, message, logs, backup_path
+    
+    Example VBA code / VBA 代码示例:
+        Sub Main()
+            Cells(1, 1).Value = "Hello"
+            MsgBox "Done"
+        End Sub
+    """
+    import json
+    
     try:
         full_path = get_excel_path(filepath)
-        result = insert_row(full_path, sheet_name, start_row, count)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
+        executor = VBAExecutor()
+        result = executor.execute_vba(full_path, vba_code, entry_sub_name)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except VBASecurityError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"安全检查失败: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
+    except VBATimeoutError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"执行超时: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
+    except VBABusyError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Excel 正忙: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
+    except VBAExecutionError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"VBA 执行错误: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
+    except WorkbookError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"工作簿错误: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"Error inserting rows: {e}")
-        raise
+        logger.error(f"Error executing VBA: {e}")
+        return json.dumps({
+            "status": "error",
+            "message": f"未知错误: {str(e)}",
+            "logs": []
+        }, ensure_ascii=False, indent=2)
+
 
 @mcp.tool()
-def insert_columns(
+def row_column_operation(
     filepath: str,
     sheet_name: str,
-    start_col: int,
+    action: str,
+    start_index: int = None,
     count: int = 1
 ) -> str:
-    """Insert one or more columns starting at the specified column."""
+    """Unified row/column operation tool.
+    
+    统一的行列操作工具。
+    
+    Actions / 操作类型:
+    - insert_rows: Insert rows (requires start_index)
+                   插入行（需要 start_index，行号从1开始）
+    - insert_cols: Insert columns (requires start_index)
+                   插入列（需要 start_index，列号从1开始）
+    - delete_rows: Delete rows (requires start_index)
+                   删除行（需要 start_index）
+    - delete_cols: Delete columns (requires start_index)
+                   删除列（需要 start_index）
+    """
     try:
         full_path = get_excel_path(filepath)
-        result = insert_cols(full_path, sheet_name, start_col, count)
-        return result["message"]
+        result = row_column_operation_impl(
+            filepath=full_path,
+            sheet_name=sheet_name,
+            action=action,
+            start_index=start_index,
+            count=count
+        )
+        return result.get("message", str(result))
     except (ValidationError, SheetError) as e:
         return f"Error: {str(e)}"
     except Exception as e:
-        logger.error(f"Error inserting columns: {e}")
-        raise
-
-@mcp.tool()
-def delete_sheet_rows(
-    filepath: str,
-    sheet_name: str,
-    start_row: int,
-    count: int = 1
-) -> str:
-    """Delete one or more rows starting at the specified row."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = delete_rows(full_path, sheet_name, start_row, count)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
+        logger.error(f"Error in row/column operation: {e}")
         return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error deleting rows: {e}")
-        raise
-
-@mcp.tool()
-def delete_sheet_columns(
-    filepath: str,
-    sheet_name: str,
-    start_col: int,
-    count: int = 1
-) -> str:
-    """Delete one or more columns starting at the specified column."""
-    try:
-        full_path = get_excel_path(filepath)
-        result = delete_cols(full_path, sheet_name, start_col, count)
-        return result["message"]
-    except (ValidationError, SheetError) as e:
-        return f"Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error deleting columns: {e}")
-        raise
 
 def run_sse():
     """Run Excel MCP server in SSE mode."""

@@ -471,3 +471,84 @@ delete_sheet_columns(
 - `start_col`: Column number where to start deleting (1-based)
 - `count`: Number of columns to delete (default: 1)
 - Returns: Success message
+
+
+## VBA Execution Operations
+
+### execute_excel_vba
+
+Execute dynamic VBA code on an Excel file.
+
+```python
+execute_excel_vba(
+    filepath: str,
+    vba_code: str,
+    entry_sub_name: str = "Main"
+) -> str
+```
+
+- `filepath`: Path to Excel file (absolute path required in stdio mode)
+- `vba_code`: Complete VBA code string, must contain a Sub matching `entry_sub_name`
+- `entry_sub_name`: Name of the entry Sub procedure (default: "Main")
+- Returns: JSON string containing execution result with:
+  - `status`: "success" or "error"
+  - `message`: Execution result description
+  - `logs`: List of execution log entries
+  - `backup_path`: Path to backup file (on success)
+
+**Security Features:**
+
+- VBA code is scanned for sensitive keywords before execution
+- Blocked keywords include: Shell, Kill, CreateObject, FileSystemObject, SendKeys, etc.
+- A backup file is automatically created before any modifications
+- Execution timeout protection (default 30 seconds)
+- Concurrent execution protection via global lock
+
+**Prerequisites:**
+
+Before using this tool, you must enable VBA trust settings in Excel:
+1. Open Excel → File → Options → Trust Center → Trust Center Settings
+2. Select "Macro Settings"
+3. Check "Trust access to the VBA project object model"
+
+**Example Usage:**
+
+```python
+# Simple cell modification
+vba_code = """
+Sub Main()
+    Cells(1, 1).Value = "Hello World"
+    Cells(1, 2).Value = Now()
+End Sub
+"""
+result = execute_excel_vba("C:/path/to/file.xlsx", vba_code, "Main")
+
+# Custom entry point
+vba_code = """
+Sub ProcessData()
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+    ws.Range("A1:A10").Value = 100
+End Sub
+"""
+result = execute_excel_vba("C:/path/to/file.xlsx", vba_code, "ProcessData")
+```
+
+**Error Handling:**
+
+The tool returns JSON with error details for various scenarios:
+- Security check failure (sensitive keywords detected)
+- File not found
+- VBA trust not enabled
+- VBA runtime errors
+- Execution timeout
+- Excel busy (concurrent execution)
+
+**Blocked Keywords:**
+
+The following keywords are blocked for security:
+- System commands: Shell, Kill, WScript, Scripting, SendKeys, AppActivate, Powershell, Cmd
+- File operations: FileSystemObject, CreateObject, GetObject, DeleteFile, DeleteFolder, CopyFile, MoveFile, MkDir, RmDir, ChDir
+- Network operations: Adodb.stream, Shell.Application, WinHttp, XMLHTTP, UrlMon
+- Environment access: Environ, CallByName
+- Auto-start macros: Workbook_Open, Auto_Open, Auto_Close

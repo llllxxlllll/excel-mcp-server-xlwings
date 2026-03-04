@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "excel-mcp-server": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "E:\\res_program\\excel-mcp-server-xlwings",
+        "--python",
+        "C:\\anaconda3\\python.exe",
+        "excel-mcp-server",
+        "stdio"
+      ],
+      "env": {
+        "PYTHONUTF8": "1"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "create_workbook",
+        "write_data_to_excel",
+        "read_data_from_excel",
+        "apply_formula",
+        "get_workbook_metadata",
+        "create_worksheet",
+        "rename_worksheet",
+        "create_chart",
+        "list_charts",
+        "delete_chart",
+        "update_chart_style",
+        "chart_operation",
+        "worksheet_operation",
+        "worksheet_operation",
+        "formula_operation",
+        "merge_cell_operation",
+        "row_column_operation",
+        "range_operation",
+        "execute_excel_vba",
+        "execute_excel_vba"
+      ],
+      "disabledTools": []
+    }
+  }
+}

@@ -1,33 +1,48 @@
+# -*- coding: utf-8 -*-
+"""工作表操作模块 - 使用 xlwings 实现
+
+本模块提供工作表管理、合并单元格、行列操作等功能。
+使用 WorkbookContext 上下文管理器自动处理文件锁定问题。
+"""
+
 import logging
-from typing import Any, Dict, Optional
-from copy import copy
+from typing import Any, Dict, List, Optional
 
-from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.styles import Font, Border, PatternFill, Side
-
+from .xw_helper import (
+    get_workbook, get_sheet, save_workbook,
+    column_string_from_index, column_index_from_string,
+    WorkbookContext
+)
 from .cell_utils import parse_cell_range
 from .exceptions import SheetError, ValidationError
 
 logger = logging.getLogger(__name__)
 
+
 def copy_sheet(filepath: str, source_sheet: str, target_sheet: str) -> Dict[str, Any]:
-    """Copy a worksheet within the same workbook."""
+    """复制工作表"""
     try:
-        wb = load_workbook(filepath)
-        if source_sheet not in wb.sheetnames:
-            raise SheetError(f"Source sheet '{source_sheet}' not found")
+        with WorkbookContext(filepath) as ctx:
+            wb = ctx.wb
             
-        if target_sheet in wb.sheetnames:
-            raise SheetError(f"Target sheet '{target_sheet}' already exists")
+            # 检查源工作表是否存在
+            sheet_names = [s.name for s in wb.sheets]
+            if source_sheet not in sheet_names:
+                raise SheetError(f"Source sheet '{source_sheet}' not found")
             
-        source = wb[source_sheet]
-        target = wb.copy_worksheet(source)
-        target.title = target_sheet
-        
-        wb.save(filepath)
-        return {"message": f"Sheet '{source_sheet}' copied to '{target_sheet}'"}
+            if target_sheet in sheet_names:
+                raise SheetError(f"Target sheet '{target_sheet}' already exists")
+            
+            # 复制工作表
+            source = wb.sheets[source_sheet]
+            source.api.Copy(After=wb.sheets[-1].api)
+            
+            # 重命名新工作表
+            new_sheet = wb.sheets[-1]
+            new_sheet.name = target_sheet
+            
+            ctx.save()
+            return {"message": f"Sheet '{source_sheet}' copied to '{target_sheet}'"}
     except SheetError as e:
         logger.error(str(e))
         raise
@@ -35,19 +50,25 @@ def copy_sheet(filepath: str, source_sheet: str, target_sheet: str) -> Dict[str,
         logger.error(f"Failed to copy sheet: {e}")
         raise SheetError(str(e))
 
+
 def delete_sheet(filepath: str, sheet_name: str) -> Dict[str, Any]:
-    """Delete a worksheet from the workbook."""
+    """删除工作表"""
     try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
+        with WorkbookContext(filepath) as ctx:
+            wb = ctx.wb
             
-        if len(wb.sheetnames) == 1:
-            raise SheetError("Cannot delete the only sheet in workbook")
+            sheet_names = [s.name for s in wb.sheets]
+            if sheet_name not in sheet_names:
+                raise SheetError(f"Sheet '{sheet_name}' not found")
             
-        del wb[sheet_name]
-        wb.save(filepath)
-        return {"message": f"Sheet '{sheet_name}' deleted"}
+            if len(wb.sheets) == 1:
+                raise SheetError("Cannot delete the only sheet in workbook")
+            
+            # 删除工作表
+            wb.sheets[sheet_name].delete()
+            
+            ctx.save()
+            return {"message": f"Sheet '{sheet_name}' deleted"}
     except SheetError as e:
         logger.error(str(e))
         raise
@@ -55,20 +76,24 @@ def delete_sheet(filepath: str, sheet_name: str) -> Dict[str, Any]:
         logger.error(f"Failed to delete sheet: {e}")
         raise SheetError(str(e))
 
+
 def rename_sheet(filepath: str, old_name: str, new_name: str) -> Dict[str, Any]:
-    """Rename a worksheet."""
+    """重命名工作表"""
     try:
-        wb = load_workbook(filepath)
-        if old_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{old_name}' not found")
+        with WorkbookContext(filepath) as ctx:
+            wb = ctx.wb
             
-        if new_name in wb.sheetnames:
-            raise SheetError(f"Sheet '{new_name}' already exists")
+            sheet_names = [s.name for s in wb.sheets]
+            if old_name not in sheet_names:
+                raise SheetError(f"Sheet '{old_name}' not found")
             
-        sheet = wb[old_name]
-        sheet.title = new_name
-        wb.save(filepath)
-        return {"message": f"Sheet renamed from '{old_name}' to '{new_name}'"}
+            if new_name in sheet_names:
+                raise SheetError(f"Sheet '{new_name}' already exists")
+            
+            wb.sheets[old_name].name = new_name
+            
+            ctx.save()
+            return {"message": f"Sheet renamed from '{old_name}' to '{new_name}'"}
     except SheetError as e:
         logger.error(str(e))
         raise
@@ -76,133 +101,19 @@ def rename_sheet(filepath: str, old_name: str, new_name: str) -> Dict[str, Any]:
         logger.error(f"Failed to rename sheet: {e}")
         raise SheetError(str(e))
 
-def format_range_string(start_row: int, start_col: int, end_row: int, end_col: int) -> str:
-    """Format range string from row and column indices."""
-    return f"{get_column_letter(start_col)}{start_row}:{get_column_letter(end_col)}{end_row}"
-
-def copy_range(
-    source_ws: Worksheet,
-    target_ws: Worksheet,
-    source_range: str,
-    target_start: Optional[str] = None,
-) -> None:
-    """Copy range from source worksheet to target worksheet."""
-    # Parse source range
-    if ':' in source_range:
-        source_start, source_end = source_range.split(':')
-    else:
-        source_start = source_range
-        source_end = None
-        
-    src_start_row, src_start_col, src_end_row, src_end_col = parse_cell_range(
-        source_start, source_end
-    )
-
-    if src_end_row is None:
-        src_end_row = src_start_row
-        src_end_col = src_start_col
-
-    if target_start is None:
-        target_start = source_start
-
-    tgt_start_row, tgt_start_col, _, _ = parse_cell_range(target_start)
-
-    for i, row in enumerate(range(src_start_row, src_end_row + 1)):
-        for j, col in enumerate(range(src_start_col, src_end_col + 1)):
-            source_cell = source_ws.cell(row=row, column=col)
-            target_cell = target_ws.cell(row=tgt_start_row + i, column=tgt_start_col + j)
-
-            target_cell.value = source_cell.value
-
-            try:
-                # Copy font
-                font_kwargs = {}
-                if hasattr(source_cell.font, 'name'):
-                    font_kwargs['name'] = source_cell.font.name
-                if hasattr(source_cell.font, 'size'):
-                    font_kwargs['size'] = source_cell.font.size
-                if hasattr(source_cell.font, 'bold'):
-                    font_kwargs['bold'] = source_cell.font.bold
-                if hasattr(source_cell.font, 'italic'):
-                    font_kwargs['italic'] = source_cell.font.italic
-                if hasattr(source_cell.font, 'color'):
-                    font_color = None
-                    if source_cell.font.color:
-                        font_color = source_cell.font.color.rgb
-                    font_kwargs['color'] = font_color
-                target_cell.font = Font(**font_kwargs)
-
-                # Copy border
-                new_border = Border()
-                for side in ['left', 'right', 'top', 'bottom']:
-                    source_side = getattr(source_cell.border, side)
-                    if source_side and source_side.style:
-                        side_color = source_side.color.rgb if source_side.color else None
-                        setattr(new_border, side, Side(
-                            style=source_side.style,
-                            color=side_color
-                        ))
-                target_cell.border = new_border
-
-                # Copy fill
-                if hasattr(source_cell, 'fill'):
-                    fill_kwargs = {'patternType': source_cell.fill.patternType}
-                    if hasattr(source_cell.fill, 'fgColor') and source_cell.fill.fgColor:
-                        fg_color = None
-                        if hasattr(source_cell.fill.fgColor, 'rgb'):
-                            fg_color = source_cell.fill.fgColor.rgb
-                        fill_kwargs['fgColor'] = fg_color
-                    if hasattr(source_cell.fill, 'bgColor') and source_cell.fill.bgColor:
-                        bg_color = None
-                        if hasattr(source_cell.fill.bgColor, 'rgb'):
-                            bg_color = source_cell.fill.bgColor.rgb
-                        fill_kwargs['bgColor'] = bg_color
-                    target_cell.fill = PatternFill(**fill_kwargs)
-
-                # Copy number format and alignment
-                if source_cell.number_format:
-                    target_cell.number_format = source_cell.number_format
-                if source_cell.alignment:
-                    target_cell.alignment = source_cell.alignment
-
-            except Exception:
-                continue
-
-def delete_range(worksheet: Worksheet, start_cell: str, end_cell: Optional[str] = None) -> None:
-    """Delete contents and formatting of a range."""
-    start_row, start_col, end_row, end_col = parse_cell_range(start_cell, end_cell)
-
-    if end_row is None:
-        end_row = start_row
-        end_col = start_col
-
-    for row in range(start_row, end_row + 1):
-        for col in range(start_col, end_col + 1):
-            cell = worksheet.cell(row=row, column=col)
-            cell.value = None
-            cell.font = Font()
-            cell.border = Border()
-            cell.fill = PatternFill()
-            cell.number_format = "General"
-            cell.alignment = None
 
 def merge_range(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> Dict[str, Any]:
-    """Merge a range of cells."""
+    """合并单元格范围"""
     try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
             
-        start_row, start_col, end_row, end_col = parse_cell_range(start_cell, end_cell)
-
-        if end_row is None or end_col is None:
-            raise SheetError("Both start and end cells must be specified for merging")
-
-        range_string = format_range_string(start_row, start_col, end_row, end_col)
-        worksheet = wb[sheet_name]
-        worksheet.merge_cells(range_string)
-        wb.save(filepath)
-        return {"message": f"Range '{range_string}' merged in sheet '{sheet_name}'"}
+            # 获取范围并合并
+            cell_range = sheet.range(f"{start_cell}:{end_cell}")
+            cell_range.merge()
+            
+            ctx.save()
+            return {"message": f"Range '{start_cell}:{end_cell}' merged in sheet '{sheet_name}'"}
     except SheetError as e:
         logger.error(str(e))
         raise
@@ -210,32 +121,19 @@ def merge_range(filepath: str, sheet_name: str, start_cell: str, end_cell: str) 
         logger.error(f"Failed to merge range: {e}")
         raise SheetError(str(e))
 
-def unmerge_range(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> Dict[str, Any]:
-    """Unmerge a range of cells."""
-    try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-            
-        worksheet = wb[sheet_name]
-        
-        start_row, start_col, end_row, end_col = parse_cell_range(start_cell, end_cell)
-        
-        if end_row is None or end_col is None:
-            raise SheetError("Both start and end cells must be specified for unmerging")
 
-        range_string = format_range_string(start_row, start_col, end_row, end_col)
-        
-        # Check if range is actually merged
-        merged_ranges = worksheet.merged_cells.ranges
-        target_range = range_string.upper()
-        
-        if not any(str(merged_range).upper() == target_range for merged_range in merged_ranges):
-            raise SheetError(f"Range '{range_string}' is not merged")
+def unmerge_range(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> Dict[str, Any]:
+    """取消合并单元格范围"""
+    try:
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
             
-        worksheet.unmerge_cells(range_string)
-        wb.save(filepath)
-        return {"message": f"Range '{range_string}' unmerged successfully"}
+            # 获取范围并取消合并
+            cell_range = sheet.range(f"{start_cell}:{end_cell}")
+            cell_range.unmerge()
+            
+            ctx.save()
+            return {"message": f"Range '{start_cell}:{end_cell}' unmerged successfully"}
     except SheetError as e:
         logger.error(str(e))
         raise
@@ -243,20 +141,132 @@ def unmerge_range(filepath: str, sheet_name: str, start_cell: str, end_cell: str
         logger.error(f"Failed to unmerge range: {e}")
         raise SheetError(str(e))
 
-def get_merged_ranges(filepath: str, sheet_name: str) -> list[str]:
-    """Get merged cells in a worksheet."""
+
+def get_merged_ranges(filepath: str, sheet_name: str) -> List[str]:
+    """获取工作表中的合并单元格范围"""
     try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-        worksheet = wb[sheet_name]
-        return [str(merged_range) for merged_range in worksheet.merged_cells.ranges]
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
+            
+            # 通过 API 获取合并范围
+            merged_areas = []
+            try:
+                for area in sheet.api.UsedRange.MergeArea:
+                    merged_areas.append(area.Address.replace('$', ''))
+            except Exception:
+                # 如果没有合并单元格，返回空列表
+                pass
+            
+            return merged_areas
     except SheetError as e:
         logger.error(str(e))
         raise
     except Exception as e:
         logger.error(f"Failed to get merged cells: {e}")
         raise SheetError(str(e))
+
+
+def insert_row(filepath: str, sheet_name: str, start_row: int, count: int = 1) -> Dict[str, Any]:
+    """插入行"""
+    try:
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
+            
+            if start_row < 1:
+                raise ValidationError("Start row must be 1 or greater")
+            if count < 1:
+                raise ValidationError("Count must be 1 or greater")
+            
+            # 使用 xlwings API 插入行
+            for _ in range(count):
+                sheet.range(f"{start_row}:{start_row}").api.Insert()
+            
+            ctx.save()
+            return {"message": f"Inserted {count} row(s) starting at row {start_row} in sheet '{sheet_name}'"}
+    except (ValidationError, SheetError) as e:
+        logger.error(str(e))
+        raise
+    except Exception as e:
+        logger.error(f"Failed to insert rows: {e}")
+        raise SheetError(str(e))
+
+
+def insert_cols(filepath: str, sheet_name: str, start_col: int, count: int = 1) -> Dict[str, Any]:
+    """插入列"""
+    try:
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
+            
+            if start_col < 1:
+                raise ValidationError("Start column must be 1 or greater")
+            if count < 1:
+                raise ValidationError("Count must be 1 or greater")
+            
+            # 使用 xlwings API 插入列
+            col_letter = column_string_from_index(start_col)
+            for _ in range(count):
+                sheet.range(f"{col_letter}:{col_letter}").api.Insert()
+            
+            ctx.save()
+            return {"message": f"Inserted {count} column(s) starting at column {start_col} in sheet '{sheet_name}'"}
+    except (ValidationError, SheetError) as e:
+        logger.error(str(e))
+        raise
+    except Exception as e:
+        logger.error(f"Failed to insert columns: {e}")
+        raise SheetError(str(e))
+
+
+def delete_rows(filepath: str, sheet_name: str, start_row: int, count: int = 1) -> Dict[str, Any]:
+    """删除行"""
+    try:
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
+            
+            if start_row < 1:
+                raise ValidationError("Start row must be 1 or greater")
+            if count < 1:
+                raise ValidationError("Count must be 1 or greater")
+            
+            # 使用 xlwings API 删除行
+            end_row = start_row + count - 1
+            sheet.range(f"{start_row}:{end_row}").api.Delete()
+            
+            ctx.save()
+            return {"message": f"Deleted {count} row(s) starting at row {start_row} in sheet '{sheet_name}'"}
+    except (ValidationError, SheetError) as e:
+        logger.error(str(e))
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete rows: {e}")
+        raise SheetError(str(e))
+
+
+def delete_cols(filepath: str, sheet_name: str, start_col: int, count: int = 1) -> Dict[str, Any]:
+    """删除列"""
+    try:
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
+            
+            if start_col < 1:
+                raise ValidationError("Start column must be 1 or greater")
+            if count < 1:
+                raise ValidationError("Count must be 1 or greater")
+            
+            # 使用 xlwings API 删除列
+            start_letter = column_string_from_index(start_col)
+            end_letter = column_string_from_index(start_col + count - 1)
+            sheet.range(f"{start_letter}:{end_letter}").api.Delete()
+            
+            ctx.save()
+            return {"message": f"Deleted {count} column(s) starting at column {start_col} in sheet '{sheet_name}'"}
+    except (ValidationError, SheetError) as e:
+        logger.error(str(e))
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete columns: {e}")
+        raise SheetError(str(e))
+
 
 def copy_range_operation(
     filepath: str,
@@ -265,52 +275,31 @@ def copy_range_operation(
     source_end: str,
     target_start: str,
     target_sheet: Optional[str] = None
-) -> Dict:
-    """Copy a range of cells to another location."""
+) -> Dict[str, Any]:
+    """复制单元格范围到另一位置"""
     try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            logger.error(f"Sheet '{sheet_name}' not found")
-            raise ValidationError(f"Sheet '{sheet_name}' not found")
-
-        source_ws = wb[sheet_name]
-        target_ws = wb[target_sheet] if target_sheet else source_ws
-
-        # Parse source range
-        try:
-            start_row, start_col, end_row, end_col = parse_cell_range(source_start, source_end)
-        except ValueError as e:
-            logger.error(f"Invalid source range: {e}")
-            raise ValidationError(f"Invalid source range: {str(e)}")
-
-        # Parse target starting point
-        try:
-            target_row = int(''.join(filter(str.isdigit, target_start)))
-            target_col = column_index_from_string(''.join(filter(str.isalpha, target_start)))
-        except ValueError as e:
-            logger.error(f"Invalid target cell: {e}")
-            raise ValidationError(f"Invalid target cell: {str(e)}")
-
-        # Copy the range
-        row_offset = target_row - start_row
-        col_offset = target_col - start_col
-
-        for i in range(start_row, end_row + 1):
-            for j in range(start_col, end_col + 1):
-                source_cell = source_ws.cell(row=i, column=j)
-                target_cell = target_ws.cell(row=i + row_offset, column=j + col_offset)
-                target_cell.value = source_cell.value
-                if source_cell.has_style:
-                    target_cell._style = copy(source_cell._style)
-
-        wb.save(filepath)
-        return {"message": f"Range copied successfully"}
-
-    except (ValidationError, SheetError):
+        with WorkbookContext(filepath) as ctx:
+            source_ws = ctx.get_sheet(sheet_name)
+            target_ws = ctx.get_sheet(target_sheet) if target_sheet else source_ws
+            
+            # 获取源范围
+            source_range = source_ws.range(f"{source_start}:{source_end}")
+            
+            # 获取目标范围
+            target_range = target_ws.range(target_start)
+            
+            # 复制
+            source_range.copy(target_range)
+            
+            ctx.save()
+            return {"message": "Range copied successfully"}
+    except (ValidationError, SheetError) as e:
+        logger.error(str(e))
         raise
     except Exception as e:
         logger.error(f"Failed to copy range: {e}")
-        raise SheetError(f"Failed to copy range: {str(e)}")
+        raise SheetError(str(e))
+
 
 def delete_range_operation(
     filepath: str,
@@ -319,46 +308,29 @@ def delete_range_operation(
     end_cell: Optional[str] = None,
     shift_direction: str = "up"
 ) -> Dict[str, Any]:
-    """Delete a range of cells and shift remaining cells."""
+    """删除单元格范围并移动剩余单元格"""
     try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
+        with WorkbookContext(filepath) as ctx:
+            sheet = ctx.get_sheet(sheet_name)
             
-        worksheet = wb[sheet_name]
-        
-        # Validate range
-        try:
-            start_row, start_col, end_row, end_col = parse_cell_range(start_cell, end_cell)
-            if end_row and end_row > worksheet.max_row:
-                raise SheetError(f"End row {end_row} out of bounds (1-{worksheet.max_row})")
-            if end_col and end_col > worksheet.max_column:
-                raise SheetError(f"End column {end_col} out of bounds (1-{worksheet.max_column})")
-        except ValueError as e:
-            raise SheetError(f"Invalid range: {str(e)}")
+            if shift_direction not in ["up", "left"]:
+                raise ValidationError(f"Invalid shift direction: {shift_direction}. Must be 'up' or 'left'")
             
-        # Validate shift direction
-        if shift_direction not in ["up", "left"]:
-            raise ValidationError(f"Invalid shift direction: {shift_direction}. Must be 'up' or 'left'")
+            # 获取范围
+            if end_cell:
+                cell_range = sheet.range(f"{start_cell}:{end_cell}")
+                range_str = f"{start_cell}:{end_cell}"
+            else:
+                cell_range = sheet.range(start_cell)
+                range_str = start_cell
             
-        range_string = format_range_string(
-            start_row, start_col,
-            end_row or start_row,
-            end_col or start_col
-        )
-        
-        # Delete range contents
-        delete_range(worksheet, start_cell, end_cell)
-        
-        # Shift cells if needed
-        if shift_direction == "up":
-            worksheet.delete_rows(start_row, (end_row or start_row) - start_row + 1)
-        elif shift_direction == "left":
-            worksheet.delete_cols(start_col, (end_col or start_col) - start_col + 1)
+            # 删除并移动
+            # xlDeleteShiftUp = -4162, xlDeleteShiftToLeft = -4159
+            shift_const = -4162 if shift_direction == "up" else -4159
+            cell_range.api.Delete(Shift=shift_const)
             
-        wb.save(filepath)
-        
-        return {"message": f"Range {range_string} deleted successfully"}
+            ctx.save()
+            return {"message": f"Range {range_str} deleted successfully"}
     except (ValidationError, SheetError) as e:
         logger.error(str(e))
         raise
@@ -366,110 +338,174 @@ def delete_range_operation(
         logger.error(f"Failed to delete range: {e}")
         raise SheetError(str(e))
 
-def insert_row(filepath: str, sheet_name: str, start_row: int, count: int = 1) -> Dict[str, Any]:
-    """Insert one or more rows starting at the specified row."""
-    try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-            
-        worksheet = wb[sheet_name]
-        
-        # Validate parameters
-        if start_row < 1:
-            raise ValidationError("Start row must be 1 or greater")
-        if count < 1:
-            raise ValidationError("Count must be 1 or greater")
-            
-        worksheet.insert_rows(start_row, count)
-        wb.save(filepath)
-        
-        return {"message": f"Inserted {count} row(s) starting at row {start_row} in sheet '{sheet_name}'"}
-    except (ValidationError, SheetError) as e:
-        logger.error(str(e))
-        raise
-    except Exception as e:
-        logger.error(f"Failed to insert rows: {e}")
-        raise SheetError(str(e))
 
-def insert_cols(filepath: str, sheet_name: str, start_col: int, count: int = 1) -> Dict[str, Any]:
-    """Insert one or more columns starting at the specified column."""
-    try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-            
-        worksheet = wb[sheet_name]
+def worksheet_operation(
+    filepath: str,
+    action: str,
+    sheet_name: str = None,
+    new_name: str = None,
+    source_sheet: str = None,
+) -> Dict[str, Any]:
+    """统一的工作表操作接口
+    
+    Unified worksheet operation interface.
+    
+    Args:
+        filepath: Excel文件路径 / Excel file path
+        action: 操作类型 / Action type (create, copy, delete, rename, list)
+        sheet_name: 工作表名称 / Worksheet name
+        new_name: 新名称（用于create/rename）/ New name (for create/rename)
+        source_sheet: 源工作表（用于copy）/ Source sheet (for copy)
         
-        # Validate parameters
-        if start_col < 1:
-            raise ValidationError("Start column must be 1 or greater")
-        if count < 1:
-            raise ValidationError("Count must be 1 or greater")
-            
-        worksheet.insert_cols(start_col, count)
-        wb.save(filepath)
-        
-        return {"message": f"Inserted {count} column(s) starting at column {start_col} in sheet '{sheet_name}'"}
-    except (ValidationError, SheetError) as e:
-        logger.error(str(e))
-        raise
-    except Exception as e:
-        logger.error(f"Failed to insert columns: {e}")
-        raise SheetError(str(e))
+    Actions / 操作类型:
+        - create: 创建工作表 (需要 new_name)
+        - copy: 复制工作表 (需要 source_sheet, new_name)
+        - delete: 删除工作表 (需要 sheet_name)
+        - rename: 重命名工作表 (需要 sheet_name, new_name)
+        - list: 列出所有工作表
+    """
+    action = action.lower()
+    
+    if action == "create":
+        if not new_name:
+            raise ValidationError("create 操作需要 new_name 参数")
+        from .workbook import create_sheet
+        return create_sheet(filepath, new_name)
+    
+    elif action == "copy":
+        if not source_sheet or not new_name:
+            raise ValidationError("copy 操作需要 source_sheet 和 new_name 参数")
+        return copy_sheet(filepath, source_sheet, new_name)
+    
+    elif action == "delete":
+        if not sheet_name:
+            raise ValidationError("delete 操作需要 sheet_name 参数")
+        return delete_sheet(filepath, sheet_name)
+    
+    elif action == "rename":
+        if not sheet_name or not new_name:
+            raise ValidationError("rename 操作需要 sheet_name 和 new_name 参数")
+        return rename_sheet(filepath, sheet_name, new_name)
+    
+    elif action == "list":
+        with WorkbookContext(filepath) as ctx:
+            sheets_info = []
+            for i, sheet in enumerate(ctx.wb.sheets):
+                sheets_info.append({
+                    "name": sheet.name,
+                    "index": i
+                })
+            return {
+                "message": f"共 {len(sheets_info)} 个工作表",
+                "sheets": sheets_info
+            }
+    
+    else:
+        raise ValidationError(
+            f"不支持的操作: {action}。支持的操作: create, copy, delete, rename, list"
+        )
 
-def delete_rows(filepath: str, sheet_name: str, start_row: int, count: int = 1) -> Dict[str, Any]:
-    """Delete one or more rows starting at the specified row."""
-    try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-            
-        worksheet = wb[sheet_name]
-        
-        # Validate parameters
-        if start_row < 1:
-            raise ValidationError("Start row must be 1 or greater")
-        if count < 1:
-            raise ValidationError("Count must be 1 or greater")
-        if start_row > worksheet.max_row:
-            raise ValidationError(f"Start row {start_row} exceeds worksheet bounds (max row: {worksheet.max_row})")
-            
-        worksheet.delete_rows(start_row, count)
-        wb.save(filepath)
-        
-        return {"message": f"Deleted {count} row(s) starting at row {start_row} in sheet '{sheet_name}'"}
-    except (ValidationError, SheetError) as e:
-        logger.error(str(e))
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete rows: {e}")
-        raise SheetError(str(e))
 
-def delete_cols(filepath: str, sheet_name: str, start_col: int, count: int = 1) -> Dict[str, Any]:
-    """Delete one or more columns starting at the specified column."""
-    try:
-        wb = load_workbook(filepath)
-        if sheet_name not in wb.sheetnames:
-            raise SheetError(f"Sheet '{sheet_name}' not found")
-            
-        worksheet = wb[sheet_name]
-        
-        # Validate parameters
-        if start_col < 1:
-            raise ValidationError("Start column must be 1 or greater")
-        if count < 1:
-            raise ValidationError("Count must be 1 or greater")
-        if start_col > worksheet.max_column:
-            raise ValidationError(f"Start column {start_col} exceeds worksheet bounds (max column: {worksheet.max_column})")
-            
-        worksheet.delete_cols(start_col, count)
-        wb.save(filepath)
-        
-        return {"message": f"Deleted {count} column(s) starting at column {start_col} in sheet '{sheet_name}'"}
-    except (ValidationError, SheetError) as e:
-        logger.error(str(e))
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete columns: {e}")
-        raise SheetError(str(e))
+def merge_cell_operation(
+    filepath: str,
+    sheet_name: str,
+    action: str,
+    start_cell: str = None,
+    end_cell: str = None
+) -> Dict[str, Any]:
+    """统一的单元格合并操作接口"""
+    action = action.lower()
+    
+    if action == "merge":
+        if not start_cell or not end_cell:
+            raise ValidationError("merge 操作需要 start_cell 和 end_cell 参数")
+        return merge_range(filepath, sheet_name, start_cell, end_cell)
+    
+    elif action == "unmerge":
+        if not start_cell or not end_cell:
+            raise ValidationError("unmerge 操作需要 start_cell 和 end_cell 参数")
+        return unmerge_range(filepath, sheet_name, start_cell, end_cell)
+    
+    elif action == "list":
+        merged = get_merged_ranges(filepath, sheet_name)
+        return {
+            "message": f"共 {len(merged)} 个合并区域",
+            "merged_ranges": merged
+        }
+    
+    else:
+        raise ValidationError(
+            f"不支持的操作: {action}。支持的操作: merge, unmerge, list"
+        )
+
+
+def row_column_operation(
+    filepath: str,
+    sheet_name: str,
+    action: str,
+    start_index: int = None,
+    count: int = 1
+) -> Dict[str, Any]:
+    """统一的行列操作接口"""
+    action = action.lower()
+    
+    if start_index is None:
+        raise ValidationError("需要 start_index 参数")
+    
+    if action == "insert_rows":
+        return insert_row(filepath, sheet_name, start_index, count)
+    
+    elif action == "insert_cols":
+        return insert_cols(filepath, sheet_name, start_index, count)
+    
+    elif action == "delete_rows":
+        return delete_rows(filepath, sheet_name, start_index, count)
+    
+    elif action == "delete_cols":
+        return delete_cols(filepath, sheet_name, start_index, count)
+    
+    else:
+        raise ValidationError(
+            f"不支持的操作: {action}。支持的操作: insert_rows, insert_cols, delete_rows, delete_cols"
+        )
+
+
+def range_operation(
+    filepath: str,
+    sheet_name: str,
+    action: str,
+    start_cell: str = None,
+    end_cell: str = None,
+    target_cell: str = None,
+    target_sheet: str = None,
+    shift_direction: str = "up"
+) -> Dict[str, Any]:
+    """统一的范围操作接口"""
+    action = action.lower()
+    
+    if action == "copy":
+        if not start_cell or not end_cell or not target_cell:
+            raise ValidationError("copy 操作需要 start_cell, end_cell, target_cell 参数")
+        return copy_range_operation(
+            filepath, sheet_name, start_cell, end_cell, 
+            target_cell, target_sheet or sheet_name
+        )
+    
+    elif action == "delete":
+        if not start_cell or not end_cell:
+            raise ValidationError("delete 操作需要 start_cell, end_cell 参数")
+        return delete_range_operation(
+            filepath, sheet_name, start_cell, end_cell, shift_direction
+        )
+    
+    elif action == "validate":
+        if not start_cell:
+            raise ValidationError("validate 操作需要 start_cell 参数")
+        from .validation import validate_range_in_sheet_operation
+        range_str = f"{start_cell}:{end_cell}" if end_cell else start_cell
+        return validate_range_in_sheet_operation(filepath, sheet_name, range_str)
+    
+    else:
+        raise ValidationError(
+            f"不支持的操作: {action}。支持的操作: copy, delete, validate"
+        )
